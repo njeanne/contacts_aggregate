@@ -100,56 +100,72 @@ def extract_colors(path, grouped):
     return colors_by_condition
 
 
-def get_all_domains_with_contacts(neighbors_dict):
+def get_all_domains_with_contacts(contacts_dict):
     """
-    Get all the domains where a neighbor contact is present.
+    Get all the domains where a contact is present.
 
-    :param neighbors_dict: the neighbors contact.
-    :type neighbors_dict: dict
-    :return: the domains where a neighbor contact is present.
+    :param contacts_dict: the contacts.
+    :type contacts_dict: dict
+    :return: the domains where a contact is present.
     :rtype: list
     """
-    domains_with_neighbors_contact = set()
-    for condition in neighbors_dict:
-        for smp in neighbors_dict[condition]:
-            for domain in neighbors_dict[condition][smp]:
-                domains_with_neighbors_contact.add(domain)
-    return domains_with_neighbors_contact
+    domains_with_contacts_contact = set()
+    for condition in contacts_dict:
+        for smp in contacts_dict[condition]:
+            for domain in contacts_dict[condition][smp]:
+                domains_with_contacts_contact.add(domain)
+    return domains_with_contacts_contact
 
 
-def aggregate_neighbors(conditions, roi, md_time, dir_path, grouped):
+def aggregate_contacts(conditions_path, md_time, dir_path, grouped, analysis):
     """
     Extract the number of contacts by region for each sample in a condition.
 
-    :param conditions: the conditions dataframe.
-    :type conditions: pandas.DataFrame
-    :param roi: the region of interest.
-    :type roi: str
+    :param conditions_path: the directories by condition paths file.
+    :type conditions_path: str
     :param md_time: the molecular dynamics duration.
     :type md_time: int
     :param dir_path: the output directory path.
     :type dir_path: str
     :param grouped: the grouped conditions.
     :type grouped: list
+    :param analysis: the analysis type.
+    :type analysis: str
     :return: the aggregated data for each frame and the conditions (in case ony condition is removed) and the domain of
     interest.
     :rtype: pandas.DataFrame, str
     """
-    pattern_sample = re.compile(f"neighborhood_(.+)_{roi}.csv")
+    roi = None
+
+    analysis_scale = "by-residue"
+    if analysis == "hydrogen bonds":
+        prefix = "hydrogen-bonds"
+        reorganized_dict = {"sample": [], "conditions": [], "domains": [], "by residue": []}
+    else:
+        reorganized_dict = {"sample": [], "conditions": [], "domains": [], "by atom": [], "by residue": []}
+        if analysis == "neighbors residues":
+            prefix = "neighborhood_residues"
+        else:
+            prefix = "neighborhood_atoms"
+            analysis_scale = "by-atom"
+
+    pattern_contact = re.compile(f"{prefix}_(.+)_(.+).csv")
+
     data = {}
     conditions_to_remove = []
+    conditions = pd.read_csv(conditions_path, sep=",", header=0)
     for _, row_condition in conditions.iterrows():
         by_condition = []
         try:
             for fn in os.listdir(row_condition["path"]):
-                if fn.startswith("neighborhood") and fn.endswith(".csv"):
+                if fn.startswith(prefix) and fn.endswith(".csv"):
                     by_condition.append(fn)
         except FileNotFoundError as exc:
             logging.error(exc, exc_info=True)
             sys.exit(1)
         if len(by_condition) == 0:
             conditions_to_remove.append(row_condition["condition"])
-            logging.warning(f"Condition {row_condition['condition']}: no RMSD files, this condition is skipped.")
+            logging.warning(f"Condition {row_condition['condition']}: no contact files, this condition is skipped.")
             continue
         logging.info(f"Aggregating {len(by_condition)} file{'s' if len(by_condition) > 1 else ''} data for condition: "
                      f"{row_condition['condition']}")
@@ -164,11 +180,14 @@ def aggregate_neighbors(conditions, roi, md_time, dir_path, grouped):
 
         for item in sorted(by_condition):
             logging.info(f"\t\t- {item}")
-            match_sample = pattern_sample.match(item)
-            if match_sample:
-                sample = match_sample.group(1)
+            match_contact = pattern_contact.match(item)
+            if match_contact:
+                sample = match_contact.group(1)
+                if not roi:
+                    roi = match_contact.group(2)
             else:
-                logging.error(f"No sample found with the pattern \"{pattern_sample.pattern}\" in the file {item}")
+                logging.error(f"No sample and region of interest found with the pattern \"{pattern_contact.pattern}\" "
+                              f"in the file {item}")
                 sys.exit(1)
             data[condition][sample] = {}
             df_current = pd.read_csv(os.path.join(row_condition["path"], item), sep=",")
@@ -177,18 +196,23 @@ def aggregate_neighbors(conditions, roi, md_time, dir_path, grouped):
             residue1_domains = df_current["residue 1 domain"].unique()
             if  len(residue1_domains) > 1:
                 logging.error(f"For {sample}: more than one domain in the columns 'ROI partner domain' "
-                              f"({', '.join(residue1_domains)}) of the neighbors contact CSV file.")
+                              f"({', '.join(residue1_domains)}) of the {analysis} contact CSV file.")
                 sys.exit(1)
 
             # get the atom and the residue pairs contacts by domain
             for residue2_domain in df_current["residue 2 domain"].unique():
                 df_res2_dom = df_current[df_current["residue 2 domain"] == residue2_domain]
-                pairs_neighbors = 0
+                pairs_contacts = 0
                 for unique_residue1_position in df_res2_dom["residue 1 position"].unique():
                     df_by_pos1_in_res2_dom = df_res2_dom[df_res2_dom["residue 1 position"] == unique_residue1_position]
-                    pairs_neighbors += df_by_pos1_in_res2_dom['residue 2 position'].nunique()
+                    pairs_contacts += df_by_pos1_in_res2_dom['residue 2 position'].nunique()
                 data[condition][sample][residue2_domain] = {"by atom": len(df_res2_dom),
-                                                            "by residue": pairs_neighbors}
+                                                            "by residue": pairs_contacts}
+    if not roi:
+        logging.error(f"No region of interest was found with the pattern \"{pattern_contact.pattern}\" in the file "
+                      f"names present in the condition directories set in {conditions_path}. The files naming "
+                      f"convention should be <ANALYSIS-TYPE>_<SAMPLE>_<REGION OF INTEREST>.csv")
+        sys.exit(1)
 
     # complete missing data in some domains
     expected_domains = get_all_domains_with_contacts(data)
@@ -199,22 +223,23 @@ def aggregate_neighbors(conditions, roi, md_time, dir_path, grouped):
                     data[condition][smp][expected_domain] = {"by atom": 0, "by residue": 0}
 
     # reorganize the data
-    reorganized_dict = {"sample": [], "conditions": [], "domains": [], "by atom": [], "by residue": []}
     for condition in data:
         for smp in data[condition]:
             for domain in data[condition][smp]:
                 reorganized_dict["sample"].append(smp)
                 reorganized_dict["conditions"].append(condition)
                 reorganized_dict["domains"].append(domain)
-                reorganized_dict["by atom"].append(data[condition][smp][domain]["by atom"])
+                if analysis != "hydrogen bonds":
+                    reorganized_dict["by atom"].append(data[condition][smp][domain]["by atom"])
                 reorganized_dict["by residue"].append(data[condition][smp][domain]["by residue"])
 
     df_out = pd.DataFrame.from_dict(reorganized_dict)
-    out_path = os.path.join(dir_path, f"neighbors_aggregated_{roi.lower().replace(' ', '-')}_{md_time}-ns.csv")
+    out_path = os.path.join(dir_path, f"{analysis.replace(' ', '-')}_{roi.replace(' ', '-')}_"
+                                      f"{analysis_scale}_{md_time}-ns.csv")
     df_out.to_csv(out_path, index=False)
     logging.info(f"Aggregated CSV file saved: {os.path.abspath(out_path)}")
 
-    return df_out
+    return df_out, roi
 
 
 def update_domains_order(labels, domains_ordered):
@@ -273,7 +298,7 @@ def update_domains_order(labels, domains_ordered):
     return updated_labels
 
 
-def compute_stats(src, domains, out_dir, roi, md_time, level_of_interaction):
+def compute_stats(src, domains, out_dir, roi, md_time, analysis, level_of_interaction):
     """
     Test the different domains contacts with the region of interest between the different conditions.
     A Mann-Whitney U test is performed with the null hypothesis is that the condition 1 group is greater than the
@@ -289,6 +314,8 @@ def compute_stats(src, domains, out_dir, roi, md_time, level_of_interaction):
     :type roi: str
     :param md_time: the molecular dynamics duration.
     :type md_time: int
+    :param analysis: the analysis type.
+    :type analysis: str
     :param level_of_interaction: the level of interaction 'by atom' or 'by residue'
     :type level_of_interaction: str
     """
@@ -327,10 +354,10 @@ def compute_stats(src, domains, out_dir, roi, md_time, level_of_interaction):
                                     f"The test output is set to N/A.")
                 data["H0"].append(f"{conditions[i]} is greater than {conditions[j]}")
     out_path = os.path.join(out_dir,
-                            f"{interaction_level.replace(' ', '-')}_statistics_"
-                            f"{roi.lower().replace(' ', '-')}_{md_time}-ns.csv")
+                            f"{analysis}_{roi.replace(' ', '-')}_"
+                            f"{interaction_level.replace(' ', '-')}_statistics_{md_time}-ns.csv")
     pd.DataFrame.from_dict(data).to_csv(out_path, index=False)
-    logging.info(f"\t\t{level_of_interaction_txt.capitalize()} level neighbors statistics file saved: {out_path}")
+    logging.info(f"\t\t{level_of_interaction_txt.capitalize()} level {analysis} statistics file saved: {out_path}")
 
 
 def all_values_equals_correction(df, pairs_list, level):
@@ -365,7 +392,8 @@ def all_values_equals_correction(df, pairs_list, level):
     return df
 
 
-def boxplot_aggregated(src, roi, colors_plot, md_time, dir_path, fmt, domains, subtitle_arg, level_of_interaction):
+def boxplot_aggregated(src, roi, colors_plot, md_time, dir_path, fmt, domains, subtitle_arg, analysis,
+                       level_of_interaction):
     """
     Create a boxplot by conditions.
 
@@ -385,10 +413,12 @@ def boxplot_aggregated(src, roi, colors_plot, md_time, dir_path, fmt, domains, s
     :type domains: list
     :param subtitle_arg: the subtitle of the plot.
     :type subtitle_arg: str
+    :param analysis: the analysis type.
+    :type analysis: str
     :param level_of_interaction: the level of interaction 'by atom' or 'by residue'
     :type level_of_interaction: str
     """
-    logging.info(f"\tPlotting the aggregated neighborhood contacts at the {level_of_interaction.split(' ')[1]}s level "
+    logging.info(f"\tPlotting the aggregated {analysis} contacts at the {level_of_interaction.split(' ')[1]}s level "
                  f"by condition:")
     plt.figure(figsize=(15, 15))
     # create the statistical pairs annotations
@@ -450,11 +480,11 @@ def boxplot_aggregated(src, roi, colors_plot, md_time, dir_path, fmt, domains, s
         plt.xlabel("Domains", fontweight="bold")
         plt.ylabel(f"Number of contacts", fontweight="bold")
         plot = ax.get_figure()
-        out_path_plot = os.path.join(dir_path, f"{level_of_interaction.replace(' ', '-')}_neighbors_"
-                                               f"aggregated_{roi.lower().replace(' ', '-')}_{md_time}-ns."
-                                               f"{fmt}")
+        out_path_plot = os.path.join(dir_path, f"{analysis}_{roi.replace(' ', '-')}_"
+                                               f"{level_of_interaction.replace(' ', '-')}_aggregated_"
+                                               f"{md_time}-ns.{fmt}")
         plot.savefig(out_path_plot)
-    logging.info(f"\t\tBoxplot at {level_of_interaction.split(' ')[1]}s level aggregated neighbors by condition: "
+    logging.info(f"\t\tBoxplot at {level_of_interaction.split(' ')[1]}s level aggregated {analysis} by condition: "
                  f"{os.path.abspath(out_path_plot)}")
 
 
@@ -468,7 +498,7 @@ if __name__ == "__main__":
 
     Distributed on an "AS IS" basis without warranties or conditions of any kind, either express or implied.
 
-    Aggregate the neighbors contacts by domains in one plot to compare between various conditions.
+    Aggregate the contacts by domains in one plot to compare between various conditions.
 
     The input is a comma separated file without header which first column is the condition, the second column the path 
     of the directory containing the contacts analysis files and the third column the color in hexadecimal format. i.e:
@@ -476,17 +506,16 @@ if __name__ == "__main__":
     insertions,tests/inputs/insertions,#fc030b
     WT,tests/inputs/WT,#0303fc
 
-    The output boxplots of neighborhood contacts (at both the atomic and residue levels) for each condition. In 
-    addition, a file containing the results of the statistical tests is produced.
+    The output boxplots of contacts (at both the atomic and residue levels) for each condition. In addition, a file 
+    containing the results of the statistical tests is produced.
     """
     parser = argparse.ArgumentParser(description=descr, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-o", "--out", required=True, type=str, help="the path to the output directory.")
     parser.add_argument("-t", "--md-time", required=True, type=int,
                         help="the molecular dynamics duration in nanoseconds.")
-    parser.add_argument("-r", "--region-of-interest", required=True, type=str,
-                        help="the name of the studied region of interest. The plot neighbors results file last part, "
-                             "in example for the testing dataset files (data/plot_neighbors_outputs), the \"HVR\" part"
-                             "of the file name.")
+    parser.add_argument("-a", "--analysis", required=True, type=str,
+                        choices=["hydrogen bonds", "neighbors residues", "neighbors atom"],
+                        help="the the analysis to aggregate")
     parser.add_argument("-d", "--domains", required=True, type=str,
                         help="a sample CSV domains annotation file, to set the order of the protein domains on the X "
                              "axis. If this option is not used, the domains will be displayed randomly.")
@@ -531,13 +560,16 @@ if __name__ == "__main__":
     logging.info(f"MD simulation time: {args.md_time} ns")
 
     ordered_domains = get_domains(args.domains)
-    data_conditions = pd.read_csv(args.input, sep=",", header=0)
     colors = extract_colors(args.input, args.group)
-    df_contacts = aggregate_neighbors(data_conditions, args.region_of_interest, args.md_time, args.out, args.group)
+    df_contacts, region_of_interest = aggregate_contacts(args.input, args.md_time, args.out, args.group,
+                                                         args.analysis)
     updated_ordered_domains = update_domains_order(list(set(df_contacts["domains"])), ordered_domains)
 
-    for interaction_level in ["by atom", "by residue"]:
-        compute_stats(df_contacts, updated_ordered_domains, args.out, args.region_of_interest, args.md_time,
-                      interaction_level)
-        boxplot_aggregated(df_contacts, args.region_of_interest, colors, args.md_time, args.out, args.format,
-                           updated_ordered_domains, args.subtitle, interaction_level)
+    interaction_levels = ["by atom", "by residue"]
+    if args.analysis == "hydrogen bonds":
+        interaction_levels = ["by residue"]
+    for interaction_level in interaction_levels:
+        compute_stats(df_contacts, updated_ordered_domains, args.out, region_of_interest, args.md_time,
+                      args.analysis, interaction_level)
+        boxplot_aggregated(df_contacts, region_of_interest, colors, args.md_time, args.out, args.format,
+                           updated_ordered_domains, args.subtitle, args.analysis, interaction_level)

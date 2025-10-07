@@ -57,23 +57,6 @@ def create_log(path, level):
     return logging
 
 
-def get_domains(domains_file_path):
-    """
-    Extract the domains in order as they are set in the CSV file.
-    
-    :param domains_file_path: the path to the protein domains CSV file.
-    :type domains_file_path: str
-    :return: the ordered domains.
-    :rtype: list
-    """
-    domains = None
-    if domains_file_path:
-        df = pd.read_csv(domains_file_path, sep=",")
-        domains = list(df["domain"])
-    return domains
-
-
-
 def extract_colors(path, grouped):
     """
     Extract the colors by conditions for the boxplots and the dots.
@@ -137,17 +120,12 @@ def aggregate_contacts(conditions_path, md_time, dir_path, grouped, analysis):
     """
     roi = None
 
-    analysis_scale = "by-residue"
     if analysis == "hydrogen bonds":
         prefix = "hydrogen-bonds"
         reorganized_dict = {"sample": [], "conditions": [], "domains": [], "by residue": []}
     else:
         reorganized_dict = {"sample": [], "conditions": [], "domains": [], "by atom": [], "by residue": []}
-        if analysis == "neighbors residues":
-            prefix = "neighborhood_residues"
-        else:
-            prefix = "neighborhood_atoms"
-            analysis_scale = "by-atom"
+        prefix = "neighborhood_residues"
 
     pattern_contact = re.compile(f"{prefix}_(.+)_(.+).csv")
 
@@ -202,12 +180,8 @@ def aggregate_contacts(conditions_path, md_time, dir_path, grouped, analysis):
             # get the atom and the residue pairs contacts by domain
             for residue2_domain in df_current["residue 2 domain"].unique():
                 df_res2_dom = df_current[df_current["residue 2 domain"] == residue2_domain]
-                pairs_contacts = 0
-                for unique_residue1_position in df_res2_dom["residue 1 position"].unique():
-                    df_by_pos1_in_res2_dom = df_res2_dom[df_res2_dom["residue 1 position"] == unique_residue1_position]
-                    pairs_contacts += df_by_pos1_in_res2_dom['residue 2 position'].nunique()
-                data[condition][sample][residue2_domain] = {"by atom": len(df_res2_dom),
-                                                            "by residue": pairs_contacts}
+                data[condition][sample][residue2_domain] = {"by atom": df_res2_dom["number atoms contacts"].sum(),
+                                                            "by residue": len(df_res2_dom)}
     if not roi:
         logging.error(f"No region of interest was found with the pattern \"{pattern_contact.pattern}\" in the file "
                       f"names present in the condition directories set in {conditions_path}. The files naming "
@@ -235,39 +209,48 @@ def aggregate_contacts(conditions_path, md_time, dir_path, grouped, analysis):
 
     df_out = pd.DataFrame.from_dict(reorganized_dict)
     out_path = os.path.join(dir_path, f"{analysis.replace(' ', '-')}_{roi.replace(' ', '-')}_"
-                                      f"{analysis_scale}_{md_time}-ns.csv")
+                                      f"{md_time}-ns.csv")
     df_out.to_csv(out_path, index=False)
     logging.info(f"Aggregated CSV file saved: {os.path.abspath(out_path)}")
 
     return df_out, roi
 
 
-def update_domains_order(labels, domains_ordered):
+def get_domains(labels, domains_file_path):
     """
-    Update and order the domains by adding before, between and after annotations if some contacts are present outside
-    the domains.
+    Extract the domains and order the domains by adding before, between and after annotations if some contacts are
+    present outside the domains.
 
     :param labels: the labels.
     :type labels: list
-    :param domains_ordered: the ordered domains on the protein.
-    :type domains_ordered: list
+    :param domains_file_path: the path to the protein domains CSV file.
+    :type domains_file_path: str
     :return: the X axis labels ordered.
     :rtype: list
     """
+    #Extract the domains in order as they are set in the CSV file.
+    domains = None
+    if domains_file_path:
+        df = pd.read_csv(domains_file_path, sep=",")
+        domains = list(df["domain"])
+
+
     updated_labels = []
     # get the annotation before any domains
     for i in range(len(labels)):
         if labels[i].startswith("before"):
             updated_labels.append(labels[i])
             break
+    # suppress the element starting with before in the labels' list
     labels[:] = [x for x in labels if not x.startswith("before")]
+    # update the labels
     logging.debug("Updating the labels:")
     logging.debug(f"\tinitial labels: {labels}")
     logging.debug(f"\tbefore domains:")
     logging.debug(f"\t\tnew labels:\t\t{updated_labels}")
     logging.debug(f"\t\tinitial labels:\t{labels}")
     # get the domains as in the ordered domains and add the between domains
-    for dom in domains_ordered:
+    for dom in domains:
         domain_index_in_labels = {}
         logging.debug(f"\tdomain {dom}:")
         for i in range(len(labels)):
@@ -294,6 +277,11 @@ def update_domains_order(labels, domains_ordered):
     logging.debug(f"\tafter domains:")
     logging.debug(f"\t\tnew labels:\t\t{updated_labels}")
     logging.debug(f"\t\tinitial labels:\t{labels}")
+
+    if len(updated_labels) == 0 and len(labels) != 0:
+        logging.error(f"The domains of the samples files do not match with the domains of the --domains "
+                      f"{domains_file_path}. Check if this annotation file is correct.")
+        sys.exit(1)
 
     return updated_labels
 
@@ -354,7 +342,7 @@ def compute_stats(src, domains, out_dir, roi, md_time, analysis, level_of_intera
                                     f"The test output is set to N/A.")
                 data["H0"].append(f"{conditions[i]} is greater than {conditions[j]}")
     out_path = os.path.join(out_dir,
-                            f"{analysis}_{roi.replace(' ', '-')}_"
+                            f"{analysis.replace(' ', '-')}_{roi.replace(' ', '-')}_"
                             f"{interaction_level.replace(' ', '-')}_statistics_{md_time}-ns.csv")
     pd.DataFrame.from_dict(data).to_csv(out_path, index=False)
     logging.info(f"\t\t{level_of_interaction_txt.capitalize()} level {analysis} statistics file saved: {out_path}")
@@ -480,7 +468,7 @@ def boxplot_aggregated(src, roi, colors_plot, md_time, dir_path, fmt, domains, s
         plt.xlabel("Domains", fontweight="bold")
         plt.ylabel(f"Number of contacts", fontweight="bold")
         plot = ax.get_figure()
-        out_path_plot = os.path.join(dir_path, f"{analysis}_{roi.replace(' ', '-')}_"
+        out_path_plot = os.path.join(dir_path, f"{analysis.replace(' ', '-')}_{roi.replace(' ', '-')}_"
                                                f"{level_of_interaction.replace(' ', '-')}_aggregated_"
                                                f"{md_time}-ns.{fmt}")
         plot.savefig(out_path_plot)
@@ -514,8 +502,7 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--md-time", required=True, type=int,
                         help="the molecular dynamics duration in nanoseconds.")
     parser.add_argument("-a", "--analysis", required=True, type=str,
-                        choices=["hydrogen bonds", "neighbors residues", "neighbors atom"],
-                        help="the the analysis to aggregate")
+                        choices=["hydrogen bonds", "neighbors"], help="the the analysis to aggregate")
     parser.add_argument("-d", "--domains", required=True, type=str,
                         help="a sample CSV domains annotation file, to set the order of the protein domains on the X "
                              "axis. If this option is not used, the domains will be displayed randomly.")
@@ -559,17 +546,16 @@ if __name__ == "__main__":
     logging.info(f"CMD: {' '.join(sys.argv)}")
     logging.info(f"MD simulation time: {args.md_time} ns")
 
-    ordered_domains = get_domains(args.domains)
     colors = extract_colors(args.input, args.group)
     df_contacts, region_of_interest = aggregate_contacts(args.input, args.md_time, args.out, args.group,
                                                          args.analysis)
-    updated_ordered_domains = update_domains_order(list(set(df_contacts["domains"])), ordered_domains)
+    ordered_domains = get_domains(list(set(df_contacts["domains"])), args.domains)
 
     interaction_levels = ["by atom", "by residue"]
     if args.analysis == "hydrogen bonds":
         interaction_levels = ["by residue"]
     for interaction_level in interaction_levels:
-        compute_stats(df_contacts, updated_ordered_domains, args.out, region_of_interest, args.md_time,
+        compute_stats(df_contacts, ordered_domains, args.out, region_of_interest, args.md_time,
                       args.analysis, interaction_level)
         boxplot_aggregated(df_contacts, region_of_interest, colors, args.md_time, args.out, args.format,
-                           updated_ordered_domains, args.subtitle, args.analysis, interaction_level)
+                           ordered_domains, args.subtitle, args.analysis, interaction_level)
